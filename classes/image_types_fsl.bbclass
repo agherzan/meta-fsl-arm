@@ -43,14 +43,14 @@ IMAGE_DEPENDS_uboot.mxsboot-sdcard = "u-boot-mxsboot-native u-boot"
 IMAGE_CMD_uboot.mxsboot-sdcard = "mxsboot sd ${DEPLOY_DIR_IMAGE}/u-boot-${MACHINE}.${UBOOT_SUFFIX} \
                                              ${DEPLOY_DIR_IMAGE}/u-boot-${MACHINE}.${UBOOT_SUFFIX_SDCARD}"
 
-# Default to 3.4GiB images
-SDCARD_SIZE ?= "3400"
-
 # Boot partition volume id
 BOOTDD_VOLUME_ID ?= "Boot ${MACHINE}"
 
-# Addional space for boot partition
-BOOT_SPACE ?= "5MiB"
+# Boot partition size [in KiB]
+BOOT_SPACE ?= "20480
+
+# Set alignment to 4MB [in KiB]
+IMAGE_ROOTFS_ALIGNMENT = "4096"
 
 IMAGE_DEPENDS_sdcard = "parted-native dosfstools-native mtools-native \
                         virtual/kernel ${IMAGE_BOOTLOADER}"
@@ -60,6 +60,8 @@ SDCARD = "${DEPLOY_DIR_IMAGE}/${IMAGE_NAME}.rootfs.sdcard"
 SDCARD_GENERATION_COMMAND_mxs = "generate_mxs_sdcard"
 SDCARD_GENERATION_COMMAND_mx5 = "generate_imx_sdcard"
 SDCARD_GENERATION_COMMAND_mx6 = "generate_imx_sdcard"
+
+
 
 #
 # Create an image that can by written onto a SD card using dd for use
@@ -71,16 +73,29 @@ SDCARD_GENERATION_COMMAND_mx6 = "generate_imx_sdcard"
 #
 # The disk layout used is:
 #
-#    0  - 1M                  - reserved to bootloader (not partitioned)
-#    1M - BOOT_SPACE          - kernel
-#    BOOT_SPACE - SDCARD_SIZE - rootfs
+#    0                      -> IMAGE_ROOTFS_ALIGNMENT         - reserved for bootloader and other data (not partitioned)
+#    IMAGE_ROOTFS_ALIGNMENT -> BOOT_SPACE                     - kernel
+#    BOOT_SPACE             -> SDIMG_SIZE                     - rootfs
+#
+#
+#                                                     Default Free space = 1.3x
+#                                                     Use IMAGE_OVERHEAD_FACTOR to add more space
+#                                                     <--------->
+#            4MiB              20MiB           SDIMG_ROOTFS
+# <-----------------------> <----------> <---------------------->
+#  ------------------------ ------------ ------------------------ -------------------------------
+# | IMAGE_ROOTFS_ALIGNMENT | BOOT_SPACE | ROOTFS_SIZE            |     IMAGE_ROOTFS_ALIGNMENT    |
+#  ------------------------ ------------ ------------------------ -------------------------------
+# ^                        ^            ^                        ^                               ^
+# |                        |            |                        |                               |
+# 0                      4MiB     4MiB + 20MiB       4MiB + 20Mib + SDIMG_ROOTFS   4MiB + 20MiB + SDIMG_ROOTFS + 4MiB
 #
 generate_imx_sdcard () {
-	# Create partition table
-	parted -s ${SDCARD} mklabel msdos
-	parted -s ${SDCARD} mkpart primary 1MiB ${BOOT_SPACE}
-	parted -s ${SDCARD} mkpart primary ${BOOT_SPACE} 100%
-	parted ${SDCARD} print
+	parted -s ${SDIMG} mklabel msdos
+	parted -s ${SDIMG} unit KiB mkpart primary ${IMAGE_ROOTFS_ALIGNMENT} $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT})
+	parted -s ${SDIMG} set 1 boot on
+	parted -s ${SDIMG} unit KiB mkpart primary $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT}) 100%
+	parted ${SDIMG} print
 
 	case "${IMAGE_BOOTLOADER}" in
 		imx-bootlets)
@@ -112,8 +127,8 @@ generate_imx_sdcard () {
 		fi
 	fi
 
-	dd if=${WORKDIR}/boot.img of=${SDCARD} conv=notrunc seek=1 bs=1M
-	dd if=${SDCARD_ROOTFS} of=${SDCARD} conv=notrunc seek=1 bs=${BOOT_SPACE}
+	dd if=${WORKDIR}/boot.img of=${SDCARD} conv=notrunc seek=1 bs=$(expr ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)
+	dd if=${SDCARD_ROOTFS} of=${SDCARD} conv=notrunc seek=1 bs=$(expr 1024 \* ${BOOT_SPACE_ALIGNED} + ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)
 }
 
 #
@@ -132,11 +147,24 @@ generate_mxs_sdcard () {
 		imx-bootlets)
 		# The disk layout used is:
 		#
-		#    1M - BOOT_SPACE          - kernel
-		#    BOOT_SPACE - SDCARD_SIZE - rootfs
+		#    0                      -> IMAGE_ROOTFS_ALIGNMENT         - reserved for bootloader and other data (not partitioned)
+		#    IMAGE_ROOTFS_ALIGNMENT -> BOOT_SPACE                     - kernel
+		#    BOOT_SPACE             -> SDIMG_SIZE                     - rootfs
 		#
-		parted -s ${SDCARD} mkpart primary 1MiB ${BOOT_SPACE}
-		parted -s ${SDCARD} mkpart primary ${BOOT_SPACE} 100%
+		#
+		#                                                     Default Free space = 1.3x
+		#                                                     Use IMAGE_OVERHEAD_FACTOR to add more space
+		#                                                     <--------->
+		#            4MiB              20MiB           SDIMG_ROOTFS
+		# <-----------------------> <----------> <---------------------->
+		#  ------------------------ ------------ ------------------------ -------------------------------
+		# | IMAGE_ROOTFS_ALIGNMENT | BOOT_SPACE | ROOTFS_SIZE            |     IMAGE_ROOTFS_ALIGNMENT    |
+		#  ------------------------ ------------ ------------------------ -------------------------------
+		# ^                        ^            ^                        ^                               ^
+		# |                        |            |                        |                               |
+		# 0                      4MiB     4MiB + 20MiB       4MiB + 20Mib + SDIMG_ROOTFS   4MiB + 20MiB + SDIMG_ROOTFS + 4MiB
+		parted -s ${SDIMG} unit KiB mkpart primary ${IMAGE_ROOTFS_ALIGNMENT} $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT})
+		parted -s ${SDIMG} unit KiB mkpart primary $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT}) 100%
 
 		# Empty 4 bytes from boot partition
 		dd if=/dev/zero of=${SDCARD} conv=notrunc seek=2048 count=4
@@ -147,13 +175,25 @@ generate_mxs_sdcard () {
 		u-boot)
 		# The disk layout used is:
 		#
-		#    1M - 2M                  - reserved to bootloader and other data
-		#    2M - BOOT_SPACE          - kernel
-		#    BOOT_SPACE - SDCARD_SIZE - rootfs
+		#    0                      -> IMAGE_ROOTFS_ALIGNMENT         - bootloader and other data
+		#    IMAGE_ROOTFS_ALIGNMENT -> BOOT_SPACE                     - kernel
+		#    BOOT_SPACE             -> SDIMG_SIZE                     - rootfs
 		#
-		parted -s ${SDCARD} mkpart primary 1MiB 2MiB
-		parted -s ${SDCARD} mkpart primary 2MiB ${BOOT_SPACE}
-		parted -s ${SDCARD} mkpart primary ${BOOT_SPACE} 100%
+		#
+		#                                                     Default Free space = 1.3x
+		#                                                     Use IMAGE_OVERHEAD_FACTOR to add more space
+		#                                                     <--------->
+		#  1MiB          4MiB              20MiB           SDIMG_ROOTFS
+		#  <--> <-----------------------> <----------> <---------------------->
+		#  ---------------------------- ------------ ------------------------ -------------------------------
+		# |    | IMAGE_ROOTFS_ALIGNMENT | BOOT_SPACE | ROOTFS_SIZE            |     IMAGE_ROOTFS_ALIGNMENT    |
+		#  ---- ------------------------ ------------ ------------------------ -------------------------------
+		# ^    ^                        ^            ^                        ^                               ^
+		# |    |                        |            |                        |                               |
+		# 0  1MiB                      4MiB     4MiB + 20MiB       4MiB + 20Mib + SDIMG_ROOTFS   4MiB + 20MiB + SDIMG_ROOTFS + 4MiB
+		parted -s ${SDCARD} unit KiB mkpart primary 1024 ${IMAGE_ROOTFS_ALIGNMENT}
+		parted -s ${SDCARD} unit KiB mkpart primary ${IMAGE_ROOTFS_ALIGNMENT} $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT})
+		parted -s ${SDCARD} unit KiB mkpart primary $(expr ${BOOT_SPACE_ALIGNED} \+ ${IMAGE_ROOTFS_ALIGNMENT}) 100%
 
 		dd if=${DEPLOY_DIR_IMAGE}/u-boot-${MACHINE}.${UBOOT_SUFFIX_SDCARD} of=${SDCARD} conv=notrunc seek=1 skip=${UBOOT_PADDING} bs=1MiB
 		BOOT_BLOCKS=$(LC_ALL=C parted -s ${SDCARD} unit b print \
@@ -169,7 +209,7 @@ generate_mxs_sdcard () {
 			fi
 		fi
 
-		dd if=${WORKDIR}/boot.img of=${SDCARD} conv=notrunc seek=2 bs=1MiB
+		dd if=${WORKDIR}/boot.img of=${SDCARD} conv=notrunc seek=1 bs=$(expr ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)
 		;;
 		*)
 		bberror "Unkown IMAGE_BOOTLOADER value"
@@ -183,7 +223,7 @@ generate_mxs_sdcard () {
 
 	parted ${SDCARD} print
 
-	dd if=${SDCARD_ROOTFS} of=${SDCARD} conv=notrunc seek=1 bs=${BOOT_SPACE}
+	dd if=${SDCARD_ROOTFS} of=${SDCARD} conv=notrunc seek=1 bs=$(expr 1024 \* ${BOOT_SPACE_ALIGNED} + ${IMAGE_ROOTFS_ALIGNMENT} \* 1024)
 }
 
 IMAGE_CMD_sdcard () {
@@ -192,8 +232,13 @@ IMAGE_CMD_sdcard () {
 		exit 1
 	fi
 
+	# Align partitions
+	BOOT_SPACE_ALIGNED=$(expr ${BOOT_SPACE} + ${IMAGE_ROOTFS_ALIGNMENT} - 1)
+	BOOT_SPACE_ALIGNED=$(expr ${BOOT_SPACE_ALIGNED} - ${BOOT_SPACE_ALIGNED} % ${IMAGE_ROOTFS_ALIGNMENT})
+	SDIMG_SIZE=$(expr ${IMAGE_ROOTFS_ALIGNMENT} + ${BOOT_SPACE_ALIGNED} + $ROOTFS_SIZE + ${IMAGE_ROOTFS_ALIGNMENT})
+
 	# Initialize a sparse file
-	dd if=/dev/zero of=${SDCARD} bs=1 count=0 seek=$(expr 1000 \* 1000 \* ${SDCARD_SIZE})
+	dd if=/dev/zero of=${SDCARD} bs=1 count=0 seek=$(expr 1024 \* ${SDIMG_SIZE})
 
 	${SDCARD_GENERATION_COMMAND}
 }
